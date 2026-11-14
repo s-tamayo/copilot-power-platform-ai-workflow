@@ -1,0 +1,107 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "actions": {
+            "Build_AI_Prompt_and_Audit_Metadata": {
+                "type": "Compose",
+                "inputs": {
+                    "auditTraceId": "@{guid()}",
+                    "documentId": "@{coalesce(triggerBody()?['documentId'], 'DOC-SAMPLE-001')}",
+                    "documentType": "@{coalesce(triggerBody()?['documentType'], 'Invoice')}",
+                    "engineeredPrompt": {
+                        "guardrails": [
+                            "ZERO_DATA_RETENTION",
+                            "SOURCE_CITATION_REQUIRED",
+                            "PII_MASKING_ENFORCED"
+                        ],
+                        "systemPrompt": "You are a Crowe Financial Audit & Compliance AI Assistant. Extract vendor, invoice total, tax jurisdiction, and control exceptions strictly from the provided document text. Never fabricate figures; flag missing sign-offs.",
+                        "userPrompt": "@{concat('Analyze ', coalesce(triggerBody()?['documentType'], 'Invoice'), ' (ID: ', coalesce(triggerBody()?['documentId'], 'DOC-SAMPLE-001'), ') from vendor ', coalesce(triggerBody()?['vendorName'], 'Acme Corp'), ' for $', string(coalesce(triggerBody()?['amountUsd'], 0)), '. Content: ', coalesce(triggerBody()?['extractedText'], 'Standard consulting invoice.') )}"
+                    },
+                    "ingestedAtUtc": "@{utcNow()}",
+                    "vendorName": "@{coalesce(triggerBody()?['vendorName'], 'Acme Corp')}"
+                },
+                "runAfter": {}
+            },
+            "Evaluate_Compliance_and_Materiality_Risk": {
+                "type": "If",
+                "expression": {
+                    "or": [
+                        {
+                            "greaterOrEquals": [
+                                "@coalesce(triggerBody()?['amountUsd'], 0)",
+                                10000
+                            ]
+                        },
+                        {
+                            "equals": [
+                                "@coalesce(triggerBody()?['hasPii'], false)",
+                                true
+                            ]
+                        },
+                        {
+                            "equals": [
+                                "@toLower(coalesce(triggerBody()?['documentType'], ''))",
+                                "taxnotice"
+                            ]
+                        }
+                    ]
+                },
+                "actions": {
+                    "Compose_High_Risk_Escalation": {
+                        "type": "Compose",
+                        "inputs": {
+                            "copilotAction": "Post_Teams_Adaptive_Card_For_Signoff",
+                            "escalationReason": "Materiality threshold (>= $10,000), Tax Notice classification, or PII detected",
+                            "priority": "HIGH",
+                            "targetQueue": "Senior_Audit_Reviewer"
+                        }
+                    }
+                },
+                "else": {
+                    "actions": {
+                        "Compose_Standard_Auto_Index": {
+                            "type": "Compose",
+                            "inputs": {
+                                "copilotAction": "Index_To_Azure_AI_Search_Knowledge_Base",
+                                "escalationReason": "Passed automated materiality and PII screening",
+                                "priority": "STANDARD",
+                                "targetQueue": "Automated_RAG_Index"
+                            }
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Build_AI_Prompt_and_Audit_Metadata": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Return_Triage_Receipt": {
+                "type": "Response",
+                "kind": "Http",
+                "inputs": {
+                    "statusCode": 200,
+                    "body": {
+                        "auditMetadata": "@outputs('Build_AI_Prompt_and_Audit_Metadata')",
+                        "routingDecision": "@coalesce(outputs('Compose_High_Risk_Escalation'), outputs('Compose_Standard_Auto_Index'))",
+                        "status": "PROCESSED"
+                    }
+                },
+                "runAfter": {
+                    "Evaluate_Compliance_and_Materiality_Risk": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "contentVersion": "1.0.0.0",
+        "outputs": {},
+        "triggers": {
+            "When_an_HTTP_request_is_received": {
+                "type": "Request",
+                "kind": "Http"
+            }
+        }
+    },
+    "kind": "Stateful"
+}
